@@ -10,7 +10,6 @@ import progressbar
 import torchaudio
 import numpy as np
 from tortoise.models.classifier import AudioMiniEncoderWithClassifierHead
-from tortoise.models.diffusion_decoder import DiffusionTts
 from tortoise.models.autoregressive import UnifiedVoice
 from tqdm import tqdm
 from tortoise.models.arch_util import TorchMelSpectrogram
@@ -20,7 +19,6 @@ from tortoise.models.hifigan_decoder import HifiganGenerator
 from tortoise.models.random_latent_generator import RandomLatentConverter
 from tortoise.models.vocoder import UnivNetGenerator
 from tortoise.utils.audio import wav_to_univnet_mel, denormalize_tacotron_mel
-from tortoise.utils.diffusion import SpacedDiffusion, space_timesteps, get_named_beta_schedule
 from tortoise.utils.tokenizer import VoiceBpeTokenizer
 from tortoise.utils.wav2vec_alignment import Wav2VecAlignment
 from contextlib import contextmanager
@@ -58,16 +56,6 @@ def pad_or_truncate(t, length):
         return F.pad(t, (0, length-t.shape[-1]))
     else:
         return t[..., :length]
-
-
-def load_discrete_vocoder_diffuser(trained_diffusion_steps=4000, desired_diffusion_steps=200, cond_free=True, cond_free_k=1):
-    """
-    Helper function to load a GaussianDiffusion instance configured for use as a vocoder.
-    """
-    return SpacedDiffusion(use_timesteps=space_timesteps(trained_diffusion_steps, [desired_diffusion_steps]), model_mean_type='epsilon',
-                           model_var_type='learned_range', loss_type='mse', betas=get_named_beta_schedule('linear', trained_diffusion_steps),
-                           conditioning_free=cond_free, conditioning_free_k=cond_free_k)
-
 
 def format_conditioning(clip, cond_length=132300, device="cuda" if not torch.backends.mps.is_available() else 'mps'):
     """
@@ -111,23 +99,6 @@ def fix_autoregressive_output(codes, stop_token, complain=True):
         codes[-1] = 248
 
     return codes
-
-
-def do_spectrogram_diffusion(diffusion_model, diffuser, latents, conditioning_latents, temperature=1, verbose=True):
-    """
-    Uses the specified diffusion model to convert discrete codes into a spectrogram.
-    """
-    with torch.no_grad():
-        output_seq_len = latents.shape[1] * 4 * 24000 // 22050  # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
-        output_shape = (latents.shape[0], 100, output_seq_len)
-        precomputed_embeddings = diffusion_model.timestep_independent(latents, conditioning_latents, output_seq_len, False)
-
-        noise = torch.randn(output_shape, device=latents.device) * temperature
-        mel = diffuser.p_sample_loop(diffusion_model, output_shape, noise=noise,
-                                      model_kwargs={'precomputed_aligned_embeddings': precomputed_embeddings},
-                                     progress=verbose)
-        return denormalize_tacotron_mel(mel)[:,:,:output_seq_len]
-
 
 def classify_audio_clip(clip):
     """
